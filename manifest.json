@@ -1,0 +1,8 @@
+{
+  "domain": "pioneer",
+  "name": "Support for Pioneer Network Receivers.",
+  "documentation": "https://home-assistant.io/components/media_player.pioneer/",
+  "dependencies": [],
+  "codeowners": ["@crowbarz"],
+  "requirements": []
+}
