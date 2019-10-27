@@ -47,9 +47,9 @@ CONF_SLOW_REFRESH = 'slow_refresh'
 
 DEFAULT_NAME = 'Pioneer AVR'
 DEFAULT_PORT = 23   # telnet default. Some Pioneer AVRs use 8102
-DEFAULT_TIMEOUT = SCAN_INTERVAL.total_seconds()
+DEFAULT_TIMEOUT = SCAN_INTERVAL.total_seconds()*3/4
 DEFAULT_SLOW_REFRESH = 5 # Scan interval multipler when all devices off
-DEFAULT_REFRESH_MAX_RETRIES = 5 # Number of retries before marking unavailable
+DEFAULT_REFRESH_MAX_RETRIES = 3 # Number of retries before marking unavailable
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_HOST): cv.string,
@@ -270,6 +270,7 @@ class PioneerDevice(PioneerZone):
         self._telnet = None
         self._zones_on = False
         self._next_refresh = 0
+        self._http_failed = False
         self._refresh_error = 0
         self._update_source = None
         self._source_name_to_number = {}
@@ -317,16 +318,16 @@ class PioneerDevice(PioneerZone):
                 if not ignore_error:
                     raise Exception("Error " + result)
                 else:
-                    _LOGGER.debug("Pioneer %s command %s returned error %s", self._name, command, result)
+                    _LOGGER.debug("%s command %s returned error %s", self._name, command, result)
                     return None
 
             if result.startswith(expected_prefix):
-                _LOGGER.debug("Pioneer %s command %s response %s", self._name, command, result)
+                _LOGGER.debug("%s command %s response %s", self._name, command, result)
                 return result
         if not ignore_error:
             raise Exception("Unexpected response " + result)
         else:
-            _LOGGER.debug("Pioneer %s command %s returned unexpected response %s", self._name, command, result)
+            _LOGGER.debug("%s command %s returned unexpected response %s", self._name, command, result)
             return None
 
     def telnet_command(self, command):
@@ -339,7 +340,7 @@ class PioneerDevice(PioneerZone):
             self.telnet_close()
             return True
         except Exception as e:
-            _LOGGER.error("Pioneer %s command %s returned error %s", self._name, command, str(e))
+            _LOGGER.error("%s command %s returned error %s", self._name, command, str(e))
             self.telnet_close()
             return False
 
@@ -372,9 +373,8 @@ class PioneerDevice(PioneerZone):
                     _LOGGER.warning("Invalid update request for zone %s", z)
                     pwstate = None
             except Exception as e:
-                _LOGGER.error("Pioneer %s telnet update returned error %s", self._name, str(e))
                 self.telnet_close()
-                return False
+                raise Exception("%s telnet update returned error %s" % (self._name, str(e)))
             if not pwstate == None:
                 zone._available = True
                 zone._pwstate = pwstate
@@ -399,11 +399,11 @@ class PioneerDevice(PioneerZone):
                 timeout=SCAN_INTERVAL.total_seconds()
             )
             if r.status_code != 200:
-                _LOGGER.error("Pioneer %s command %s returned error %d", self._name, command, r.status_code)
+                _LOGGER.error("%s command %s returned error %d", self._name, command, r.status_code)
                 return False
             return True
         except Exception as e:
-            _LOGGER.error("Pioneer %s command %s returned error %s", self._name, command, str(e))
+            _LOGGER.error("%s command %s returned error %s", self._name, command, str(e))
             return False
 
     def http_get_status(self):
@@ -412,21 +412,21 @@ class PioneerDevice(PioneerZone):
             _LOGGER.debug("Sending http status request")
             r = requests.get(
                 'http://' + self._host + '/StatusHandler.asp',
-                timeout=SCAN_INTERVAL.total_seconds()
+                timeout=self._timeout
             )
         except Exception as e:
-            _LOGGER.error("Pioneer %s status update exception: %s", self._name, str(e))
-            return None
+            raise Exception("%s status update exception: %s" % (self._name, str(e)))
         if r.status_code != 200:
-            _LOGGER.error("Pioneer %s status update returned error %d", self._name, command, r.status_code)
-            return None
+            raise Exception("%s status update returned error %d" % (self._name, command, r.status_code))
         return r.json()
 
     def http_update(self):
         """Update device via HTTP interface."""
-        status = self.http_get_status()
-        if status == None:
-            return False
+        try:
+            status = self.http_get_status()
+        except:
+            raise
+
         zone_status = reduce(lambda n, i: dict(n, **i), status['Z'])
         for z in self.zones:
             zone = self.zones[z]
@@ -456,11 +456,11 @@ class PioneerDevice(PioneerZone):
 
     def send_command(self, command):
         """Send a command to the device."""
-        if self._use_http:
+        if self._use_http and not self._http_failed:
             if self.http_command(command):
                 return True
             else:
-                _LOGGER.warning("Pioneer %s command %s http failed, trying telnet", self._name, command)
+                _LOGGER.warning("%s command %s http failed, trying telnet", self._name, command)
         return self.telnet_command(command)
 
     def init_update(self):
@@ -500,11 +500,13 @@ class PioneerDevice(PioneerZone):
             _LOGGER.debug("Source num->name: %s", self._source_number_to_name)
             return True
         except Exception as e:
-            _LOGGER.error("Pioneer %s status update exception: %s", self._name, str(e))
+            _LOGGER.error("%s status update exception: %s", self._name, str(e))
             return False
 
     def set_refresh(self):
         """Check whether any zones are on, if not set slow refresh interval."""
+        if self._refresh_error:
+            _LOGGER.warning("%s is now available", self._name)
         self._refresh_error = 0
         if not self._zones_on:
             self._next_refresh = self._slow_refresh
@@ -527,30 +529,43 @@ class PioneerDevice(PioneerZone):
         ## Perform HTTP update if HTTP is enabled
         self._zones_on = False
         if self._use_http:
-            if self.http_update():
+            try:
+                if self.http_update():
+                    self.set_refresh()
+                    self.telnet_close()
+                    self._init = True
+                    if self._http_failed:
+                        _LOGGER.warning("%s reverting to http update", self._name)
+                    self._http_failed = False
+                    return True
+            except Exception as e:
+                if not self._http_failed:
+                    _LOGGER.error(str(e))
+            if not self._http_failed:
+                _LOGGER.warning("%s http update failed, trying telnet", self._name)
+            self._http_failed = True
+
+        ## Perform telnet update
+        try:
+            if self.telnet_update():
                 self.set_refresh()
                 self.telnet_close()
                 self._init = True
                 return True
-            else:
-                _LOGGER.warning("Pioneer %s http update failed, trying telnet", self._name)
-
-        ## Perform telnet update
-        if self.telnet_update():
-            self.set_refresh()
-            self.telnet_close()
-            self._init = True
-            return True
+        except Exception as e:
+            if self._refresh_error == 0:
+                _LOGGER.error(str(e))
 
         ## Status is unavailable
         self._refresh_error += 1
         if self._refresh_error < DEFAULT_REFRESH_MAX_RETRIES:
-            _LOGGER.warning("Pioneer %s update failed #%d, retry next", self._name, self._refresh_error)
+            _LOGGER.warning("%s update failed #%d, retrying", self._name, self._refresh_error)
             self.telnet_close()
             return True
 
         ## Mark all zones unavailable
-        _LOGGER.error("Pioneer %s update failed, marking zones unavailable", self._name)
+        if self._refresh_error == DEFAULT_REFRESH_MAX_RETRIES:
+            _LOGGER.error("%s update failed max times #%d, marking zones unavailable", self._name, self._refresh_error)
         for z in self.zones:
             zone = self.zones[z]
             zone._available = False
