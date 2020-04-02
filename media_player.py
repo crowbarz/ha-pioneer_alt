@@ -44,6 +44,7 @@ SCAN_INTERVAL = timedelta(seconds=1)
 
 CONF_USE_HTTP = 'use_http'
 CONF_SLOW_REFRESH = 'slow_refresh'
+CONF_ZONE_1_VOLUME_WORKAROUND = 'zone_1_volume_workaround'
 
 DEFAULT_NAME = 'Pioneer AVR'
 DEFAULT_PORT = 23   # telnet default. Some Pioneer AVRs use 8102
@@ -57,7 +58,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
     vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.socket_timeout,
     vol.Optional(CONF_SLOW_REFRESH, default=DEFAULT_SLOW_REFRESH): cv.positive_int,
-    vol.Optional(CONF_USE_HTTP, default=True): cv.boolean
+    vol.Optional(CONF_USE_HTTP, default=True): cv.boolean,
+    vol.Optional(CONF_ZONE_1_VOLUME_WORKAROUND, default=False): cv.boolean
 })
 
 
@@ -67,7 +69,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     pioneer = PioneerDevice(
         config.get(CONF_NAME), config.get(CONF_HOST), config.get(CONF_PORT),
         config.get(CONF_TIMEOUT), config.get(CONF_SLOW_REFRESH),
-        config.get(CONF_USE_HTTP))
+        config.get(CONF_USE_HTTP), config.get(CONF_ZONE_1_VOLUME_WORKAROUND))
 
     if pioneer.update():
         msg = "Init complete, adding entities: "
@@ -258,7 +260,7 @@ class PioneerZone(MediaPlayerDevice):
 class PioneerDevice(PioneerZone):
     """Representation of a Pioneer device."""
 
-    def __init__(self, name, host, port, timeout, slow_refresh, use_http):
+    def __init__(self, name, host, port, timeout, slow_refresh, use_http, zone_1_volume_workaround):
         """Initialize the Pioneer device."""
         _LOGGER.debug("PioneerDevice() started")
         self._host = host
@@ -266,6 +268,7 @@ class PioneerDevice(PioneerZone):
         self._timeout = timeout
         self._slow_refresh = slow_refresh
         self._use_http = use_http
+        self._zone_1_volume_workaround = zone_1_volume_workaround
         self._init = False
         self._telnet = None
         self._zones_on = False
@@ -432,6 +435,7 @@ class PioneerDevice(PioneerZone):
             zone = self.zones[z]
             zone_data = zone_status.get(ZONE_JSON_MAP[z])
             if zone_data:
+                old_pwstate = zone._pwstate
                 zone._available = True
                 zone._pwstate = (zone_data['P'] == 1)
                 zone._volume = zone_data['V']
@@ -441,6 +445,11 @@ class PioneerDevice(PioneerZone):
                 )
                 if zone._pwstate:
                     self._zones_on = True
+                if z == "1" and self._zone_1_volume_workaround and old_pwstate == False and zone._pwstate:
+                    ## Zone just turned on, tweak volume to work around volume
+                    ## reporting bug for main zone with an initial volume set
+                    zone.volume_up()
+                    zone.volume_down()
                 if self._init and zone != '1':
                     zone.schedule_update_ha_state()
                 _LOGGER.debug("HTTP update Zone %s: P:%s V:%d M:%s S:%s", z, zone._pwstate, zone._volume, zone._muted, zone._source)
@@ -451,7 +460,7 @@ class PioneerDevice(PioneerZone):
 
     def send_request(self, command, expected_prefix, ignore_error=False):
         """Execute a command and return the response."""
-        ## No http method to execute command, use telnet
+        ## No http method to execute requests, use telnet
         return self.telnet_request(command, expected_prefix, ignore_error)
 
     def send_command(self, command):
