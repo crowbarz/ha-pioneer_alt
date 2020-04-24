@@ -150,9 +150,14 @@ class PioneerZone(MediaPlayerDevice):
     @property
     def device_state_attributes(self):
         """Return device specific state attributes."""
+        if self._zone == "1":
+            volume_db = self._volume / 2 - 80.5
+        else:
+            volume_db = self._volume - 81
         return {
             'device_volume': self._volume,
             'device_max_volume': self._max_volume,
+            'device_volume_db': volume_db,
             'parent_entity': self._parent_device.entity_id,
             'update_source': self._parent_device._update_source
         }
