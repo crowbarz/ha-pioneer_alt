@@ -13,7 +13,7 @@ import voluptuous as vol
 
 from functools import reduce
 from homeassistant.components.media_player import (
-    PLATFORM_SCHEMA, MediaPlayerDevice)
+    PLATFORM_SCHEMA, MediaPlayerEntity)
 from homeassistant.components.media_player.const import (
     SUPPORT_TURN_OFF, SUPPORT_TURN_ON, SUPPORT_SELECT_SOURCE,
     SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET, SUPPORT_VOLUME_STEP)
@@ -78,7 +78,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         _LOGGER.debug(msg)
         add_entities(pioneer.zones.values())
 
-class PioneerZone(MediaPlayerDevice):
+class PioneerZone(MediaPlayerEntity):
     """Representation of a Pioneer zone."""
 
     def __init__(self, name, zone, parent_device):
